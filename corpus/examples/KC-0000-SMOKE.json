@@ -47,6 +47,6 @@
     "command": "/Users/coop/kernel-contracts/harness/run.py pair --reading-a-conforming /tmp/kc_smoke/a_conf.json --reading-a-bad /tmp/kc_smoke/a_bad.json --reading-b-conforming /tmp/kc_smoke/b_conf.json --reading-b-bad /tmp/kc_smoke/b_bad.json --contract-class C-PRC-01 --primitive path_dependence --tolerance-structure backward_error --shape (128,128)x(128,128) --dtype-in fp32 --entry-id KC-0000-SMOKE --status illustrative --out corpus/examples/KC-0000-SMOKE.json",
     "seed": 0,
     "harness_version": "0.1.0",
-    "timestamp": "2026-08-25T01:22:53.086120+00:00"
+    "timestamp": "2026-08-25T01:33:53.213633+00:00"
   }
 }

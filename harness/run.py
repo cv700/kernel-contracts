@@ -59,6 +59,12 @@ OPERATOR_TABLE = {
         gen_input=lambda rng, n: (rng.standard_normal((n, n)).astype(np.float32),
                                    rng.standard_normal((n, n)).astype(np.float32)),
         condition_number_correction=lambda n: n,
+        # GPU path: conforming accumulates at dtype_accum as declared; bad
+        # forces fp16 accumulation regardless of what was declared. Real
+        # divergence comes from whatever the vendor's kernel actually does
+        # at that precision on that silicon -- not from a numpy simulation.
+        gpu_conforming=lambda x, dtype_accum: ops.matmul_candidate_torch(x[0], x[1], dtype_accum),
+        gpu_bad=lambda x, dtype_accum: ops.matmul_candidate_torch(x[0], x[1], "fp16"),
     ),
     "softmax": dict(
         reference=ops.softmax_reference,
@@ -75,6 +81,8 @@ OPERATOR_TABLE = {
         # is the same conservative (worst-case, not average-case) choice
         # made for matmul above, for the same reason.
         condition_number_correction=lambda n: n,
+        gpu_conforming=lambda x, dtype_accum: ops.softmax_candidate_torch(x[0], stabilized=True),
+        gpu_bad=lambda x, dtype_accum: ops.softmax_candidate_torch(x[0], stabilized=False),
     ),
 }
 
@@ -89,17 +97,31 @@ def cmd_measure(args):
     correction = spec["condition_number_correction"](args.n)
     eta = tol.derive_eta_from_unit_roundoff(args.dtype_accum, correction)
 
-    candidate_fn = spec["conforming"] if args.candidate == "conforming" else spec["bad"]
-    y_star = spec["reference"](x) if not isinstance(x, tuple) else spec["reference"](*x)
-    y = candidate_fn(x) if not isinstance(x, tuple) else candidate_fn(*x)
     x_arg = x if isinstance(x, tuple) else (x,)
+    y_star = spec["reference"](x) if not isinstance(x, tuple) else spec["reference"](*x)
+
+    if args.device == "cpu":
+        candidate_fn = spec["conforming"] if args.candidate == "conforming" else spec["bad"]
+        y = candidate_fn(x) if not isinstance(x, tuple) else candidate_fn(*x)
+    else:
+        if "gpu_conforming" not in spec:
+            sys.exit(f"{args.operator}: no GPU-dispatched candidate wired up yet; "
+                      f"add one to OPERATOR_TABLE before running with --device cuda")
+        gpu_fn = spec["gpu_conforming"] if args.candidate == "conforming" else spec["gpu_bad"]
+        y = gpu_fn(x_arg, args.dtype_accum)
+
     divergence = spec["tolerance_fn"](x_arg, y_star, y)
 
     detected = sil.detect_local()
+    if args.device == "cuda" and "CPU" in detected.runtime:
+        sys.exit(f"--device cuda was requested but silicon detection found no GPU "
+                  f"({detected.runtime!r}). Refusing to write a reading that would "
+                  f"mislabel a CPU run as GPU silicon.")
 
     reading = {
         "operator": args.operator,
         "candidate": args.candidate,
+        "device": args.device,
         "dtype_accum": args.dtype_accum,
         "eta": eta,
         "divergence": divergence,
@@ -135,6 +157,14 @@ def cmd_pair(args):
         if bad["satisfies"]:
             print(f"WARNING: silicon {label}'s injected-bad candidate PASSED (divergence={bad['divergence']:.6g} <= eta={bad['eta']:.6g}). "
                   f"Calibration is unsound for this contract. Recording verdict=under_specified.", file=sys.stderr)
+
+    if args.status == "measured":
+        if a_conf.get("device") != "cuda" or b_conf.get("device") != "cuda":
+            sys.exit("status=measured requires both readings to come from --device cuda runs. "
+                      "CPU-simulated readings can only be paired as status=illustrative.")
+        if a_conf["silicon"]["arch"] == b_conf["silicon"]["arch"]:
+            sys.exit(f"status=measured requires two DIFFERENT silicon arches; both readings "
+                      f"report {a_conf['silicon']['arch']!r}. Same GPU twice is not a cross-silicon pair.")
 
     calibration_sound = (a_conf["satisfies"] and not a_bad["satisfies"] and
                           b_conf["satisfies"] and not b_bad["satisfies"])
@@ -246,6 +276,10 @@ def main():
     m.add_argument("--operator", required=True, choices=list(OPERATOR_TABLE))
     m.add_argument("--dtype-accum", required=True)
     m.add_argument("--candidate", required=True, choices=["conforming", "bad"])
+    m.add_argument("--device", default="cpu", choices=["cpu", "cuda"],
+                    help="'cpu' uses the numpy simulation (fine for illustrative entries). "
+                         "'cuda' dispatches to real GPU silicon via torch (covers CUDA and "
+                         "ROCm builds) and is required for status=measured entries.")
     m.add_argument("--n", type=int, default=256, help="problem size (matrix dim / vector length)")
     m.add_argument("--seed", type=int, default=0)
     m.add_argument("--out", required=True)

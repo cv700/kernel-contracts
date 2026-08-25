@@ -34,10 +34,15 @@ def detect_local() -> Silicon:
         import torch  # noqa: F401 -- optional; not a hard dependency of this module
         if torch.cuda.is_available():
             name = torch.cuda.get_device_name(0)
+            # ROCm builds of torch also report through torch.cuda.* (this is
+            # a real PyTorch quirk, not a bug here) -- torch.version.hip is
+            # set only on ROCm builds and is the actual way to tell them
+            # apart from a real CUDA build.
+            if getattr(torch.version, "hip", None):
+                driver = _try(["rocm-smi", "--showdriverversion"])
+                return Silicon(arch=name, driver=driver or "unknown", runtime=f"ROCm {torch.version.hip} (torch {torch.__version__})")
             driver = _try(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"])
-            return Silicon(arch=name, driver=driver or "unknown", runtime=f"CUDA {torch.version.cuda}")
-        if hasattr(torch, "hip") and torch.cuda.is_available():  # ROCm reports via torch.cuda too
-            return Silicon(arch="AMD-ROCm-device", runtime=f"ROCm (torch {torch.__version__})")
+            return Silicon(arch=name, driver=driver or "unknown", runtime=f"CUDA {torch.version.cuda} (torch {torch.__version__})")
     except ImportError:
         pass
 

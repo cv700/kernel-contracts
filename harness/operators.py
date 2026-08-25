@@ -88,6 +88,72 @@ def softmax_candidate_stabilized(x, axis=-1):
 
 
 # ---------------------------------------------------------------------------
+# GPU-dispatched candidates (torch, device="cuda" -- covers both real CUDA
+# and ROCm builds of torch, see silicon.py's docstring on that quirk).
+# These are what actually make a corpus entry silicon-specific instead of
+# a numpy simulation of one. Requires torch with a CUDA or ROCm build
+# installed; import is deferred into the function bodies so this module
+# still imports cleanly (and the CPU-simulated candidates above still run)
+# on a machine with no torch at all, e.g. this one.
+# ---------------------------------------------------------------------------
+
+def _require_torch():
+    try:
+        import torch
+    except ImportError as e:
+        raise ImportError(
+            "torch is required for GPU-dispatched candidates. "
+            "Install a CUDA or ROCm build (pip install torch --index-url ...; "
+            "see README provisioning notes) -- not needed for the CPU-"
+            "simulated candidates above."
+        ) from e
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "torch is installed but no CUDA/ROCm device is visible. "
+            "Check you're on a GPU instance and the driver matches the "
+            "torch build (nvidia-smi / rocm-smi should show the device)."
+        )
+    return torch
+
+
+def matmul_candidate_torch(A, B, accum_dtype_name, device="cuda"):
+    """Runs GEMM on real GPU silicon via torch, accumulating at
+    accum_dtype_name. This is the actual candidate a corpus entry's
+    silicon-specific behavior comes from -- unlike
+    matmul_candidate_downcast_accumulator above, this doesn't force a
+    particular outcome; it reports whatever the vendor's kernel actually
+    does, which is the entire point of measuring rather than simulating.
+    """
+    torch = _require_torch()
+    dtype_map = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}
+    if accum_dtype_name not in dtype_map:
+        raise ValueError(f"unsupported accum_dtype_name {accum_dtype_name!r}; add it to dtype_map if needed")
+    dt = dtype_map[accum_dtype_name]
+    A_t = torch.from_numpy(A).to(device=device, dtype=dt)
+    B_t = torch.from_numpy(B).to(device=device, dtype=dt)
+    y_t = A_t @ B_t
+    return y_t.to(dtype=torch.float32).cpu().numpy()
+
+
+def softmax_candidate_torch(x, device="cuda", stabilized=True):
+    """Runs softmax on real GPU silicon via torch. stabilized=False
+    disables torch's internal stabilization where possible by computing
+    exp/sum manually instead of calling torch.softmax (which is always
+    stabilized) -- this is what actually exercises the C-PRC-02 overflow
+    pattern on real hardware rather than assuming numpy's behavior
+    generalizes.
+    """
+    torch = _require_torch()
+    x_t = torch.from_numpy(x).to(device=device, dtype=torch.float32)
+    if stabilized:
+        y_t = torch.softmax(x_t, dim=-1)
+    else:
+        e = torch.exp(x_t)
+        y_t = e / torch.sum(e, dim=-1, keepdim=True)
+    return y_t.cpu().numpy()
+
+
+# ---------------------------------------------------------------------------
 # Not yet implemented -- see README "Status". Each needs a reference impl,
 # a conforming candidate, and an injected-bad candidate before it can
 # produce corpus entries.
