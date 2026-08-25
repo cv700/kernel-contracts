@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Thin wrapper so the commands read as `./kc measure matmul --device cuda`
+# instead of `python3 -m harness.run measure --operator matmul --device cuda`.
+# Uses ./.venv if it exists, otherwise whatever `python3` resolves to.
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PY="$DIR/.venv/bin/python"
+[ -x "$PY" ] || PY="python3"
+exec "$PY" -m harness.run "$@"

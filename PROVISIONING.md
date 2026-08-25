@@ -45,7 +45,7 @@ convenience once this is routine.
 ## Steps, per box
 
 ```bash
-git clone <this repo, once it has a remote>   # or scp the directory over
+git clone https://github.com/cv700/kernel-contracts.git
 cd kernel-contracts
 pip install -r requirements.txt   # numpy + jsonschema; torch is already on the image
 
@@ -53,37 +53,25 @@ pip install -r requirements.txt   # numpy + jsonschema; torch is already on the 
 python3 -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
 
 # Validate the harness on THIS silicon before spending more time:
-python3 -m harness.run selftest --n 128 --seed 0
+./kc selftest
 
-# Produce the four readings for matmul (repeat for softmax):
-python3 -m harness.run measure --operator matmul --dtype-accum fp32 \
-    --candidate conforming --device cuda --seed 0 --n 1024 --out matmul_conforming.json
-python3 -m harness.run measure --operator matmul --dtype-accum fp32 \
-    --candidate bad --device cuda --seed 0 --n 1024 --out matmul_bad.json
+# One command per operator, runs both candidates, writes one file:
+./kc measure matmul --device cuda --n 1024 --out matmul_nvidia.json
 ```
 
-Download the four JSON readings (`scp` or the provider's file browser) --
-you need both boxes' readings on one machine to run `pair`. Any machine
-works for `pair` itself; it just combines JSON files and validates schema,
-no GPU needed.
+Repeat on the second box (`--out matmul_amd.json`). Download both files to
+one machine (`scp` or the provider's file browser) -- `combine` needs both
+at once but doesn't need a GPU itself:
 
 ```bash
-python3 -m harness.run pair \
-    --reading-a-conforming nvidia_matmul_conforming.json \
-    --reading-a-bad nvidia_matmul_bad.json \
-    --reading-b-conforming amd_matmul_conforming.json \
-    --reading-b-bad amd_matmul_bad.json \
-    --contract-class C-PRC-01 --primitive path_dependence \
-    --tolerance-structure backward_error \
-    --shape "(1024,1024)x(1024,1024)" --dtype-in fp32 \
-    --entry-id KC-0001 --status measured \
-    --out corpus/v0.1/KC-0001.json
+./kc combine matmul_nvidia.json matmul_amd.json
 ```
 
-`pair` will refuse to write `status: measured` if either reading wasn't
-`--device cuda`, or if both silicon arches came back identical -- that's
-the guard against accidentally producing a mislabeled entry, not a bug if
-it triggers.
+That's it -- no flags to fill in by hand. `combine` refuses to call the
+result `status: measured` unless both readings are `--device cuda` on two
+different silicon arches; if either check fails it writes `illustrative`
+instead rather than erroring, so you always get a file, just correctly
+labeled.
 
 ## What you'll actually be looking at
 

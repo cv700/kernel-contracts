@@ -1,5 +1,5 @@
 {
-  "entry_id": "KC-0000-SMOKE",
+  "entry_id": "KC-0001",
   "status": "illustrative",
   "operator": {
     "name": "matmul",
@@ -12,13 +12,13 @@
       "arch": "Apple-Apple M5",
       "firmware": "unknown",
       "driver": "unknown",
-      "runtime": "CPU (no torch installed): 3.14.7"
+      "runtime": "CPU (no torch installed): 3.14.3"
     },
     "b": {
       "arch": "Apple-Apple M5",
       "firmware": "unknown",
       "driver": "unknown",
-      "runtime": "CPU (no torch installed): 3.14.7"
+      "runtime": "CPU (no torch installed): 3.14.3"
     }
   },
   "contract_class": "C-PRC-01",
@@ -44,9 +44,9 @@
   },
   "verdict": "within_tolerance",
   "reproduction": {
-    "command": "/Users/coop/kernel-contracts/harness/run.py pair --reading-a-conforming /tmp/kc_smoke/a_conf.json --reading-a-bad /tmp/kc_smoke/a_bad.json --reading-b-conforming /tmp/kc_smoke/b_conf.json --reading-b-bad /tmp/kc_smoke/b_bad.json --contract-class C-PRC-01 --primitive path_dependence --tolerance-structure backward_error --shape (128,128)x(128,128) --dtype-in fp32 --entry-id KC-0000-SMOKE --status illustrative --out corpus/examples/KC-0000-SMOKE.json",
+    "command": "/Users/coop/kernel-contracts/harness/run.py combine /tmp/kc_smoke2/a.json /tmp/kc_smoke2/b.json",
     "seed": 0,
-    "harness_version": "0.1.0",
-    "timestamp": "2026-08-25T01:33:53.213633+00:00"
+    "harness_version": "0.2.0",
+    "timestamp": "2026-08-25T12:44:40.314592+00:00"
   }
 }

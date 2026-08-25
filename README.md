@@ -30,7 +30,7 @@ across vendors. That's the gap this project is scoped to.
   no GPU (numpy only) for schema validation and calibration-soundness
   checks; producing a real `status: measured` entry needs the candidate run
   on actual silicon.
-- `corpus/examples/` -- one worked example (`KC-0000-SMOKE.json`),
+- `corpus/examples/` -- one worked example (`KC-0001.json`),
   `status: illustrative`, both readings from the same machine. Not a
   cross-silicon measurement -- a demonstration that the pipeline runs
   end to end.
@@ -61,22 +61,16 @@ two implemented operators, produce the first real paired entries.
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# Validate the harness locally, no GPU needed:
-python3 -m harness.run selftest
-
-# Produce a reading on this machine:
-python3 -m harness.run measure --operator matmul --dtype-accum fp32 \
-    --candidate conforming --seed 0 --out reading.json
-
-# Combine readings from two machines into a corpus entry:
-python3 -m harness.run pair \
-    --reading-a-conforming a_conf.json --reading-a-bad a_bad.json \
-    --reading-b-conforming b_conf.json --reading-b-bad b_bad.json \
-    --contract-class C-PRC-01 --primitive path_dependence \
-    --shape "(1024,1024)x(1024,1024)" --dtype-in fp32 \
-    --entry-id KC-0001 --status measured \
-    --out corpus/v0.1/KC-0001.json
+./kc selftest                              # no GPU needed
+./kc measure matmul --device cuda --out a.json     # run on box 1
+./kc measure matmul --device cuda --out b.json     # run on box 2
+./kc combine a.json b.json                 # writes corpus/v0.1/KC-000N.json
 ```
+
+That's the whole interface: three commands. `combine` figures out the
+contract class, tolerance structure, entry id, and whether this counts as
+`measured` or `illustrative` on its own -- see `harness/run.py --help` if
+you need to override something.
 
 ## Why "corpus," and why open
 

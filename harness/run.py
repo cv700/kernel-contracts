@@ -1,34 +1,23 @@
 #!/usr/bin/env python3
-"""CLI entrypoint. Two-step workflow, because real corpus entries need two
-different physical machines (one per silicon), so one process can't
-produce a full entry in one shot.
+"""CLI entrypoint. Three commands, in order of use:
 
-Step 1 -- on each machine, once per silicon:
-    python3 -m harness.run measure --operator matmul --dtype-accum fp32 \\
-        --candidate conforming --seed 0 --out reading_nvidia_conforming.json
-    python3 -m harness.run measure --operator matmul --dtype-accum fp32 \\
-        --candidate bad --seed 0 --out reading_nvidia_bad.json
-    (repeat on the second machine for readings_amd_*.json)
+    ./kc selftest                          # no GPU needed, validates the harness
+    ./kc measure matmul --device cuda --out nvidia.json      # once per box
+    ./kc measure matmul --device cuda --out amd.json         # once per box
+    ./kc combine nvidia.json amd.json      # writes corpus/v0.1/KC-0001.json
 
-Step 2 -- on any machine, combine two conforming+bad reading pairs into a
-schema-valid corpus entry:
-    python3 -m harness.run pair \\
-        --reading-a-conforming reading_nvidia_conforming.json \\
-        --reading-a-bad reading_nvidia_bad.json \\
-        --reading-b-conforming reading_amd_conforming.json \\
-        --reading-b-bad reading_amd_bad.json \\
-        --contract-class C-PRC-01 --primitive path_dependence \\
-        --entry-id KC-0001 --status measured \\
-        --out corpus/v0.1/KC-0001.json
-
-Running `measure` on this machine (no GPU) produces status=illustrative
-readings via the CPU-simulated candidates in operators.py. Do not pass
---status measured for anything produced this way -- see operators.py's
-module docstring for why.
+`measure` runs both the conforming and the injected-bad candidate in one
+call and writes one file. `combine` takes just the two files -- contract
+class, primitive, tolerance structure, and dtype default all come from
+OPERATOR_TABLE, entry id auto-increments, status is inferred from whether
+both readings are real GPU runs on different silicon. Override any of it
+with flags if you need to; you shouldn't need to for the common case.
 """
 import argparse
 import json
+import re
 import sys
+from pathlib import Path
 from datetime import datetime, timezone
 
 import numpy as np
@@ -38,13 +27,24 @@ from . import tolerance as tol
 from . import calibration as cal
 from . import silicon as sil
 
-HARNESS_VERSION = "0.1.0"
+HARNESS_VERSION = "0.2.0"
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 OPERATOR_TABLE = {
     # tolerance_fn takes (x, y_star, y) so operators whose backward-error
     # bound depends on the input (matmul) and operators that only need the
     # candidate output (softmax's invariant check) share one interface.
+    #
+    # contract_class / primitive / tolerance_structure / dtype_in are the
+    # schema metadata that used to be CLI flags on `pair`. They're a
+    # property of the operator, not something a caller should have to
+    # know or re-type correctly every time.
     "matmul": dict(
+        contract_class="C-PRC-01",
+        primitive="path_dependence",
+        tolerance_structure="backward_error",
+        default_dtype_in="fp32",
+        default_dtype_accum="fp32",
         reference=ops.matmul_reference,
         conforming=ops.matmul_candidate_conforming,
         bad=ops.matmul_candidate_downcast_accumulator,
@@ -59,6 +59,7 @@ OPERATOR_TABLE = {
         gen_input=lambda rng, n: (rng.standard_normal((n, n)).astype(np.float32),
                                    rng.standard_normal((n, n)).astype(np.float32)),
         condition_number_correction=lambda n: n,
+        shape=lambda n: f"({n},{n})x({n},{n})",
         # GPU path: conforming accumulates at dtype_accum as declared; bad
         # forces fp16 accumulation regardless of what was declared. Real
         # divergence comes from whatever the vendor's kernel actually does
@@ -67,6 +68,11 @@ OPERATOR_TABLE = {
         gpu_bad=lambda x, dtype_accum: ops.matmul_candidate_torch(x[0], x[1], "fp16"),
     ),
     "softmax": dict(
+        contract_class="C-PRC-02",
+        primitive="path_dependence",
+        tolerance_structure="invariant",
+        default_dtype_in="fp32",
+        default_dtype_accum="fp32",
         reference=ops.softmax_reference,
         conforming=ops.softmax_candidate_stabilized,
         bad=ops.softmax_candidate_no_stabilization,
@@ -81,36 +87,34 @@ OPERATOR_TABLE = {
         # is the same conservative (worst-case, not average-case) choice
         # made for matmul above, for the same reason.
         condition_number_correction=lambda n: n,
+        shape=lambda n: f"N=8,d={n}",
         gpu_conforming=lambda x, dtype_accum: ops.softmax_candidate_torch(x[0], stabilized=True),
         gpu_bad=lambda x, dtype_accum: ops.softmax_candidate_torch(x[0], stabilized=False),
     ),
 }
 
 
+def _run_one_candidate(spec, x, x_arg, y_star, device, dtype_accum, which):
+    if device == "cpu":
+        fn = spec["conforming"] if which == "conforming" else spec["bad"]
+        return fn(x) if not isinstance(x, tuple) else fn(*x)
+    if "gpu_conforming" not in spec:
+        sys.exit(f"no GPU-dispatched candidate wired up for this operator yet; "
+                  f"add one to OPERATOR_TABLE before running with --device cuda")
+    gpu_fn = spec["gpu_conforming"] if which == "conforming" else spec["gpu_bad"]
+    return gpu_fn(x_arg, dtype_accum)
+
+
 def cmd_measure(args):
     if args.operator not in OPERATOR_TABLE:
         sys.exit(f"unknown operator {args.operator!r}; choices: {list(OPERATOR_TABLE)}")
     spec = OPERATOR_TABLE[args.operator]
+    dtype_accum = args.dtype_accum or spec["default_dtype_accum"]
+
     rng = np.random.default_rng(args.seed)
     x = spec["gen_input"](rng, args.n)
-
-    correction = spec["condition_number_correction"](args.n)
-    eta = tol.derive_eta_from_unit_roundoff(args.dtype_accum, correction)
-
     x_arg = x if isinstance(x, tuple) else (x,)
     y_star = spec["reference"](x) if not isinstance(x, tuple) else spec["reference"](*x)
-
-    if args.device == "cpu":
-        candidate_fn = spec["conforming"] if args.candidate == "conforming" else spec["bad"]
-        y = candidate_fn(x) if not isinstance(x, tuple) else candidate_fn(*x)
-    else:
-        if "gpu_conforming" not in spec:
-            sys.exit(f"{args.operator}: no GPU-dispatched candidate wired up yet; "
-                      f"add one to OPERATOR_TABLE before running with --device cuda")
-        gpu_fn = spec["gpu_conforming"] if args.candidate == "conforming" else spec["gpu_bad"]
-        y = gpu_fn(x_arg, args.dtype_accum)
-
-    divergence = spec["tolerance_fn"](x_arg, y_star, y)
 
     detected = sil.detect_local()
     if args.device == "cuda" and "CPU" in detected.runtime:
@@ -118,98 +122,123 @@ def cmd_measure(args):
                   f"({detected.runtime!r}). Refusing to write a reading that would "
                   f"mislabel a CPU run as GPU silicon.")
 
+    correction = spec["condition_number_correction"](args.n)
+    eta = tol.derive_eta_from_unit_roundoff(dtype_accum, correction)
+
+    results = {}
+    for which in ("conforming", "bad"):
+        y = _run_one_candidate(spec, x, x_arg, y_star, args.device, dtype_accum, which)
+        divergence = spec["tolerance_fn"](x_arg, y_star, y)
+        results[which] = {"divergence": divergence, "satisfies": tol.satisfies(divergence, eta)}
+
+    sound = results["conforming"]["satisfies"] and not results["bad"]["satisfies"]
+    status_word = "OK" if sound else "UNSOUND"
+    conforming_word = "accepted, correctly" if results["conforming"]["satisfies"] else "REJECTED -- should have been accepted"
+    bad_word = "rejected, correctly" if not results["bad"]["satisfies"] else "ACCEPTED -- contract is too loose"
+    print(f"{args.operator} on {detected.arch} ({args.device}): "
+          f"conforming d={results['conforming']['divergence']:.4g} ({conforming_word}); "
+          f"bad d={results['bad']['divergence']:.4g} ({bad_word})  [{status_word}]")
+    if not sound:
+        print("WARNING: calibration not sound on this silicon -- writing the reading anyway, "
+              "but `combine` will refuse to call it status=measured.", file=sys.stderr)
+
     reading = {
         "operator": args.operator,
-        "candidate": args.candidate,
         "device": args.device,
-        "dtype_accum": args.dtype_accum,
+        "dtype_accum": dtype_accum,
+        "dtype_in": spec["default_dtype_in"],
+        "n": args.n,
         "eta": eta,
-        "divergence": divergence,
-        "satisfies": tol.satisfies(divergence, eta),
-        "injection_method": spec["injection_method"] if args.candidate == "bad" else None,
-        "n_samples": args.n,
+        "conforming": results["conforming"],
+        "bad": {**results["bad"], "injection_method": spec["injection_method"]},
+        "sound": sound,
         "seed": args.seed,
         "silicon": detected.to_dict(),
         "harness_version": HARNESS_VERSION,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-    with open(args.out, "w") as f:
+    out = args.out or f"{args.operator}_{detected.arch.replace(' ', '_')}.json"
+    with open(out, "w") as f:
         json.dump(reading, f, indent=2)
-    print(f"wrote {args.out}: divergence={divergence:.6g} eta={eta:.6g} satisfies={reading['satisfies']}")
+    print(f"wrote {out}")
 
 
-def cmd_pair(args):
-    with open(args.reading_a_conforming) as f:
-        a_conf = json.load(f)
-    with open(args.reading_a_bad) as f:
-        a_bad = json.load(f)
-    with open(args.reading_b_conforming) as f:
-        b_conf = json.load(f)
-    with open(args.reading_b_bad) as f:
-        b_bad = json.load(f)
+def _next_entry_id():
+    existing = list((REPO_ROOT / "corpus" / "v0.1").glob("KC-*.json")) + \
+               list((REPO_ROOT / "corpus" / "examples").glob("KC-*.json"))
+    nums = [int(m.group(1)) for f in existing if (m := re.match(r"KC-(\d+)", f.stem))]
+    return f"KC-{(max(nums) + 1) if nums else 1:04d}"
 
-    for pair, label in [((a_conf, a_bad), "a"), ((b_conf, b_bad), "b")]:
-        conf, bad = pair
-        if conf["operator"] != bad["operator"]:
-            sys.exit(f"readings for silicon {label}: operator mismatch")
-        if not conf["satisfies"]:
-            sys.exit(f"readings for silicon {label}: conforming candidate does not satisfy its own contract; fix eta or the candidate before pairing")
-        if bad["satisfies"]:
-            print(f"WARNING: silicon {label}'s injected-bad candidate PASSED (divergence={bad['divergence']:.6g} <= eta={bad['eta']:.6g}). "
-                  f"Calibration is unsound for this contract. Recording verdict=under_specified.", file=sys.stderr)
 
-    if args.status == "measured":
-        if a_conf.get("device") != "cuda" or b_conf.get("device") != "cuda":
-            sys.exit("status=measured requires both readings to come from --device cuda runs. "
-                      "CPU-simulated readings can only be paired as status=illustrative.")
-        if a_conf["silicon"]["arch"] == b_conf["silicon"]["arch"]:
-            sys.exit(f"status=measured requires two DIFFERENT silicon arches; both readings "
-                      f"report {a_conf['silicon']['arch']!r}. Same GPU twice is not a cross-silicon pair.")
+def cmd_combine(args):
+    with open(args.reading_a) as f:
+        a = json.load(f)
+    with open(args.reading_b) as f:
+        b = json.load(f)
 
-    calibration_sound = (a_conf["satisfies"] and not a_bad["satisfies"] and
-                          b_conf["satisfies"] and not b_bad["satisfies"])
-    verdict = "within_tolerance" if calibration_sound else "under_specified"
-    # If both conforming candidates pass but this is a REAL cross-silicon
-    # measured pair, the interesting verdict is whether a's and b's actual
-    # (non-injected) outputs diverge from each other beyond eta -- that
-    # comparison needs the raw candidate outputs, not just conforming/bad
-    # against the reference. v0 records the calibration-soundness verdict;
-    # add direct a-vs-b output comparison in v0.2 once real paired GPU runs
-    # exist to design it against.
+    if a["operator"] != b["operator"]:
+        sys.exit(f"reading files are for different operators ({a['operator']!r} vs {b['operator']!r})")
+    operator = a["operator"]
+    spec = OPERATOR_TABLE[operator]
+
+    for reading, label in [(a, args.reading_a), (b, args.reading_b)]:
+        if not reading["conforming"]["satisfies"]:
+            sys.exit(f"{label}: conforming candidate does not satisfy its own contract; "
+                      f"fix the tolerance or candidate before combining")
+        if reading["bad"]["satisfies"]:
+            print(f"WARNING: {label}'s injected-bad candidate PASSED. "
+                  f"Calibration is unsound; recording verdict=under_specified.", file=sys.stderr)
+
+    both_gpu = a["device"] == "cuda" and b["device"] == "cuda"
+    different_silicon = a["silicon"]["arch"] != b["silicon"]["arch"]
+    inferred_status = "measured" if (both_gpu and different_silicon) else "illustrative"
+    status = args.status or inferred_status
+    if status == "measured" and not (both_gpu and different_silicon):
+        sys.exit(f"--status measured requires both readings from --device cuda on different "
+                  f"silicon (got device={a['device']!r}/{b['device']!r}, "
+                  f"arch={a['silicon']['arch']!r}/{b['silicon']['arch']!r}). "
+                  f"Omit --status to let it infer illustrative, or fix the readings.")
+
+    sound = a["sound"] and b["sound"]
+    verdict = "within_tolerance" if sound else "under_specified"
+
+    entry_id = args.id or _next_entry_id()
+    default_dir = "v0.1" if status == "measured" else "examples"
+    out = args.out or str(REPO_ROOT / "corpus" / default_dir / f"{entry_id}.json")
 
     entry = {
-        "entry_id": args.entry_id,
-        "status": args.status,
+        "entry_id": entry_id,
+        "status": status,
         "operator": {
-            "name": a_conf["operator"],
-            "shape": args.shape,
-            "dtype_in": args.dtype_in,
-            "dtype_accum": a_conf["dtype_accum"],
+            "name": operator,
+            "shape": spec["shape"](a["n"]),
+            "dtype_in": a["dtype_in"],
+            "dtype_accum": a["dtype_accum"],
         },
-        "silicon_pair": {"a": a_conf["silicon"], "b": b_conf["silicon"]},
-        "contract_class": args.contract_class,
-        "primitive": args.primitive,
+        "silicon_pair": {"a": a["silicon"], "b": b["silicon"]},
+        "contract_class": spec["contract_class"],
+        "primitive": spec["primitive"],
         "tolerance": {
-            "structure": args.tolerance_structure,
-            "eta": a_conf["eta"],
-            "derivation": f"derive_eta_from_unit_roundoff({a_conf['dtype_accum']!r}), see harness/tolerance.py",
+            "structure": spec["tolerance_structure"],
+            "eta": a["eta"],
+            "derivation": f"derive_eta_from_unit_roundoff({a['dtype_accum']!r}), see harness/tolerance.py",
         },
         "measurement": {
-            "divergence": max(a_bad["divergence"], b_bad["divergence"]),
+            "divergence": max(a["bad"]["divergence"], b["bad"]["divergence"]),
             "method": "max(injected-bad divergence on silicon a, on silicon b), each vs float64 reference",
-            "n_samples": a_conf["n_samples"],
+            "n_samples": a["n"],
         },
         "calibration": {
-            "reference_conforming": {"result": "pass" if (a_conf["satisfies"] and b_conf["satisfies"]) else "fail"},
+            "reference_conforming": {"result": "pass" if (a["conforming"]["satisfies"] and b["conforming"]["satisfies"]) else "fail"},
             "injected_bad": {
-                "result": "fail" if (not a_bad["satisfies"] and not b_bad["satisfies"]) else "pass",
-                "injection_method": a_bad["injection_method"] or b_bad["injection_method"] or "n/a",
+                "result": "fail" if (not a["bad"]["satisfies"] and not b["bad"]["satisfies"]) else "pass",
+                "injection_method": a["bad"]["injection_method"],
             },
         },
         "verdict": verdict,
         "reproduction": {
             "command": " ".join(sys.argv),
-            "seed": a_conf["seed"],
+            "seed": a["seed"],
             "harness_version": HARNESS_VERSION,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         },
@@ -217,18 +246,19 @@ def cmd_pair(args):
 
     try:
         import jsonschema
-        with open(args.schema) as f:
+        with open(REPO_ROOT / "schema" / "entry.schema.json") as f:
             schema = json.load(f)
         jsonschema.validate(entry, schema)
-        print("schema: valid")
+        schema_note = "schema: valid"
     except ImportError:
-        print("schema: skipped (pip install jsonschema to validate)", file=sys.stderr)
+        schema_note = "schema: skipped (pip install jsonschema to validate)"
     except Exception as e:
         sys.exit(f"schema: INVALID -- {e}")
 
-    with open(args.out, "w") as f:
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w") as f:
         json.dump(entry, f, indent=2)
-    print(f"wrote {args.out}: verdict={verdict}")
+    print(f"{schema_note}\nwrote {out}  [{entry_id}, status={status}, verdict={verdict}]")
 
 
 def cmd_selftest(args):
@@ -244,7 +274,7 @@ def cmd_selftest(args):
         x = spec["gen_input"](rng, args.n)
         x_arg = x if isinstance(x, tuple) else (x,)
         correction = spec["condition_number_correction"](args.n)
-        eta = tol.derive_eta_from_unit_roundoff(args.dtype_accum, correction)
+        eta = tol.derive_eta_from_unit_roundoff(spec["default_dtype_accum"], correction)
 
         result = cal.run_calibration(
             x=x_arg,
@@ -272,37 +302,27 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    m = sub.add_parser("measure", help="run reference+candidate on this machine, write a reading")
-    m.add_argument("--operator", required=True, choices=list(OPERATOR_TABLE))
-    m.add_argument("--dtype-accum", required=True)
-    m.add_argument("--candidate", required=True, choices=["conforming", "bad"])
+    m = sub.add_parser("measure", help="run both candidates for one operator on this machine, write one reading")
+    m.add_argument("operator", choices=list(OPERATOR_TABLE))
     m.add_argument("--device", default="cpu", choices=["cpu", "cuda"],
-                    help="'cpu' uses the numpy simulation (fine for illustrative entries). "
-                         "'cuda' dispatches to real GPU silicon via torch (covers CUDA and "
-                         "ROCm builds) and is required for status=measured entries.")
+                    help="'cpu' = numpy simulation, illustrative only. "
+                         "'cuda' = real GPU via torch (CUDA or ROCm), required for status=measured.")
+    m.add_argument("--dtype-accum", default=None, help="defaults to the operator's usual accumulator dtype")
     m.add_argument("--n", type=int, default=256, help="problem size (matrix dim / vector length)")
     m.add_argument("--seed", type=int, default=0)
-    m.add_argument("--out", required=True)
+    m.add_argument("--out", default=None, help="defaults to '<operator>_<arch>.json'")
     m.set_defaults(func=cmd_measure)
 
-    pr = sub.add_parser("pair", help="combine two silicons' conforming+bad readings into a corpus entry")
-    pr.add_argument("--reading-a-conforming", required=True)
-    pr.add_argument("--reading-a-bad", required=True)
-    pr.add_argument("--reading-b-conforming", required=True)
-    pr.add_argument("--reading-b-bad", required=True)
-    pr.add_argument("--contract-class", required=True)
-    pr.add_argument("--primitive", required=True, choices=["path_dependence", "domain_violation", "resource_contention"])
-    pr.add_argument("--tolerance-structure", default="pointwise_relative")
-    pr.add_argument("--shape", required=True)
-    pr.add_argument("--dtype-in", required=True)
-    pr.add_argument("--entry-id", required=True)
-    pr.add_argument("--status", required=True, choices=["measured", "illustrative"])
-    pr.add_argument("--schema", default="schema/entry.schema.json")
-    pr.add_argument("--out", required=True)
-    pr.set_defaults(func=cmd_pair)
+    c = sub.add_parser("combine", help="combine two silicons' readings into a corpus entry")
+    c.add_argument("reading_a")
+    c.add_argument("reading_b")
+    c.add_argument("--id", default=None, help="defaults to the next KC-#### not already in corpus/")
+    c.add_argument("--status", default=None, choices=["measured", "illustrative"],
+                    help="defaults to an inferred value: measured iff both readings are --device cuda on different silicon")
+    c.add_argument("--out", default=None, help="defaults to corpus/v0.1/<id>.json or corpus/examples/<id>.json")
+    c.set_defaults(func=cmd_combine)
 
     st = sub.add_parser("selftest", help="run all operators' three-state calibration locally, no GPU needed")
-    st.add_argument("--dtype-accum", default="fp32")
     st.add_argument("--n", type=int, default=128)
     st.add_argument("--seed", type=int, default=0)
     st.set_defaults(func=cmd_selftest)

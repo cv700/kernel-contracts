@@ -1,23 +1,25 @@
 # Contributing a corpus entry
 
-1. Run `python3 -m harness.run selftest` first. If it reports UNSOUND for
-   any operator you're about to use, fix that before producing entries with
-   it -- an unsound calibration means the contract wouldn't catch its own
-   injected failure, so any entry it produces is not evidence of anything.
+1. Run `./kc selftest` first. If it reports UNSOUND for any operator
+   you're about to use, fix that before producing entries with it -- an
+   unsound calibration means the contract wouldn't catch its own injected
+   failure, so any entry it produces is not evidence of anything.
 
-2. Run `measure` twice on each of two different physical silicons
-   (conforming + bad candidate on each). Four JSON readings total. Same
-   machine twice does not count as a silicon pair -- label it
-   `status: illustrative` if that's what you have, not `measured`.
+2. Run `./kc measure <operator> --device cuda --out X.json` on each of two
+   different physical silicons. Two JSON files total (one per box, each
+   already containing both the conforming and bad candidate). Same machine
+   twice does not count as a silicon pair -- `combine` will refuse to call
+   it `measured` and will fall back to `illustrative` on its own.
 
-3. Run `pair` to combine the four readings into one entry. It validates
-   against `schema/entry.schema.json` automatically if `jsonschema` is
-   installed; if you skipped that in requirements, install it before
-   opening a PR -- an unvalidated entry will be rejected in review anyway.
+3. Run `./kc combine A.json B.json`. It infers the entry id, the status,
+   and all the contract metadata, and validates the result against
+   `schema/entry.schema.json` automatically if `jsonschema` is installed --
+   install it before opening a PR if you skipped it in requirements; an
+   unvalidated entry will be rejected in review anyway.
 
-4. Open a PR adding the entry to `corpus/v0.1/`. Include the exact command
-   used to generate each reading (the `reproduction` field records this
-   automatically, but state it in the PR description too).
+4. Open a PR adding the entry `combine` wrote under `corpus/v0.1/`. Include
+   the exact commands used (the `reproduction` field records the `combine`
+   invocation automatically, but state the two `measure` commands too).
 
 ## Adding a new operator
 
