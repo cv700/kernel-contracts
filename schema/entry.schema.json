@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kernel-contracts.org/schema/entry.schema.json",
+  "title": "Kernel Contracts corpus entry",
+  "description": "One measured (or, if marked illustrative, synthesized) cross-silicon divergence case, annotated against a contract class and a three-state calibration result. Field names track the contract-triple semantics in the Kernel Contracts paper, section 3.",
+  "type": "object",
+  "required": [
+    "entry_id", "operator", "silicon_pair", "contract_class", "primitive",
+    "tolerance", "measurement", "calibration", "verdict", "reproduction", "status"
+  ],
+  "properties": {
+    "entry_id": {
+      "type": "string",
+      "description": "Stable identifier, e.g. KC-0001. Never reused, even if an entry is superseded."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["measured", "illustrative"],
+      "description": "'measured' = produced by running harness/run.py against real silicon. 'illustrative' = worked example, not a measurement. Illustrative entries must not be counted toward corpus size claims."
+    },
+    "operator": {
+      "type": "object",
+      "required": ["name", "shape", "dtype_in", "dtype_accum"],
+      "properties": {
+        "name": {"type": "string", "description": "e.g. matmul, softmax, attention, reduction_sum, gather"},
+        "shape": {"type": "string", "description": "e.g. '(1024,1024)x(1024,1024)' or 'N=8192,d=128'"},
+        "dtype_in": {"type": "string", "description": "e.g. fp8_e4m3, bf16, fp16, fp32"},
+        "dtype_accum": {"type": "string", "description": "declared accumulator precision, e.g. fp32"}
+      }
+    },
+    "silicon_pair": {
+      "type": "object",
+      "required": ["a", "b"],
+      "properties": {
+        "a": {"$ref": "#/$defs/silicon"},
+        "b": {"$ref": "#/$defs/silicon"}
+      }
+    },
+    "contract_class": {
+      "type": "string",
+      "enum": [
+        "C-PRC-01", "C-PRC-02", "C-PRC-03", "C-PRC-04",
+        "C-ORD-01", "C-ORD-02", "C-ORD-03",
+        "C-CMP-01", "C-CMP-02", "C-CMP-03",
+        "C-EXC-01", "C-EXC-02"
+      ]
+    },
+    "primitive": {
+      "type": "string",
+      "enum": ["path_dependence", "domain_violation", "resource_contention"],
+      "description": "Which of the three physical primitives (paper section 3.7) this class instantiates."
+    },
+    "tolerance": {
+      "type": "object",
+      "required": ["structure", "eta", "derivation"],
+      "properties": {
+        "structure": {
+          "type": "string",
+          "enum": ["backward_error", "pointwise_relative", "pointwise_absolute", "invariant", "composite"]
+        },
+        "eta": {"type": "number", "description": "The tolerance bound. For composite structures, the binding component."},
+        "derivation": {
+          "type": "string",
+          "description": "How eta was derived. Must name a first-principles source (unit roundoff, condition number correction, invariant definition) -- never 'measured from candidate under test'. See paper section 3.11 on why the latter is disallowed."
+        }
+      }
+    },
+    "measurement": {
+      "type": "object",
+      "required": ["divergence", "method", "n_samples"],
+      "properties": {
+        "divergence": {"type": "number", "description": "Measured value of the tolerance function tau(x, y*, y) for the worst-case or aggregate sample."},
+        "method": {"type": "string", "description": "e.g. 'max over 1024 samples from calibration distribution mu'"},
+        "n_samples": {"type": "integer"}
+      }
+    },
+    "calibration": {
+      "type": "object",
+      "required": ["reference_conforming", "injected_bad"],
+      "description": "Three-state calibration record (paper section 5.1). A contract without both states recorded is not falsifiable.",
+      "properties": {
+        "reference_conforming": {
+          "type": "object",
+          "required": ["result"],
+          "properties": {
+            "result": {"type": "string", "enum": ["pass", "fail"]},
+            "note": {"type": "string"}
+          }
+        },
+        "injected_bad": {
+          "type": "object",
+          "required": ["result", "injection_method"],
+          "properties": {
+            "result": {"type": "string", "enum": ["pass", "fail"], "description": "A well-calibrated contract should FAIL the injected-bad candidate. A 'pass' here means the contract is under-specified."},
+            "injection_method": {"type": "string", "description": "e.g. 'forced downcast to fp16 accumulator', 'shuffled reduction order', 'clamp-instead-of-raise on OOB index'"}
+          }
+        }
+      }
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["within_tolerance", "violation", "under_specified"],
+      "description": "'under_specified' = divergence observed but not attributable to any clause in this entry's contract_class (paper section 3.4, case 3)."
+    },
+    "reproduction": {
+      "type": "object",
+      "required": ["command", "seed", "harness_version"],
+      "properties": {
+        "command": {"type": "string"},
+        "seed": {"type": "integer"},
+        "harness_version": {"type": "string"},
+        "timestamp": {"type": "string", "format": "date-time"}
+      }
+    }
+  },
+  "$defs": {
+    "silicon": {
+      "type": "object",
+      "required": ["arch", "driver", "runtime"],
+      "properties": {
+        "arch": {"type": "string", "description": "e.g. H100, MI300X, Apple-M3-Max"},
+        "firmware": {"type": "string"},
+        "driver": {"type": "string"},
+        "runtime": {"type": "string", "description": "e.g. CUDA 12.6 / Triton 3.4, ROCm 6.2"}
+      }
+    }
+  }
+}

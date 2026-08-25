@@ -1,0 +1,6 @@
+numpy>=1.24
+jsonschema>=4.0
+# torch is required only for harness/run.py `measure` runs on real GPU
+# silicon (CUDA or ROCm). Not required for schema validation, tolerance
+# math, or CPU-simulated illustrative entries.
+# torch>=2.2

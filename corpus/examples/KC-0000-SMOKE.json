@@ -1,0 +1,52 @@
+{
+  "entry_id": "KC-0000-SMOKE",
+  "status": "illustrative",
+  "operator": {
+    "name": "matmul",
+    "shape": "(128,128)x(128,128)",
+    "dtype_in": "fp32",
+    "dtype_accum": "fp32"
+  },
+  "silicon_pair": {
+    "a": {
+      "arch": "Apple-Apple M5",
+      "firmware": "unknown",
+      "driver": "unknown",
+      "runtime": "CPU (no torch installed): 3.14.7"
+    },
+    "b": {
+      "arch": "Apple-Apple M5",
+      "firmware": "unknown",
+      "driver": "unknown",
+      "runtime": "CPU (no torch installed): 3.14.7"
+    }
+  },
+  "contract_class": "C-PRC-01",
+  "primitive": "path_dependence",
+  "tolerance": {
+    "structure": "backward_error",
+    "eta": 7.62939453125e-06,
+    "derivation": "derive_eta_from_unit_roundoff('fp32'), see harness/tolerance.py"
+  },
+  "measurement": {
+    "divergence": 3.210055245901007e-05,
+    "method": "max(injected-bad divergence on silicon a, on silicon b), each vs float64 reference",
+    "n_samples": 128
+  },
+  "calibration": {
+    "reference_conforming": {
+      "result": "pass"
+    },
+    "injected_bad": {
+      "result": "fail",
+      "injection_method": "forced downcast to fp16 accumulator (declared fp32)"
+    }
+  },
+  "verdict": "within_tolerance",
+  "reproduction": {
+    "command": "/Users/coop/kernel-contracts/harness/run.py pair --reading-a-conforming /tmp/kc_smoke/a_conf.json --reading-a-bad /tmp/kc_smoke/a_bad.json --reading-b-conforming /tmp/kc_smoke/b_conf.json --reading-b-bad /tmp/kc_smoke/b_bad.json --contract-class C-PRC-01 --primitive path_dependence --tolerance-structure backward_error --shape (128,128)x(128,128) --dtype-in fp32 --entry-id KC-0000-SMOKE --status illustrative --out corpus/examples/KC-0000-SMOKE.json",
+    "seed": 0,
+    "harness_version": "0.1.0",
+    "timestamp": "2026-08-25T01:22:53.086120+00:00"
+  }
+}
